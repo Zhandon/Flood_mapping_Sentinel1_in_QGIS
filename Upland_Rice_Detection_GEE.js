@@ -307,11 +307,11 @@ var buildMonthlyComposites = function(roi, year, maxCloud) {
     var end = date.advance(1, 'month');
     var filtered = s2.filterDate(date, end).select(indexNames);
     var composite = filtered.median();
-    // Label each band with YYYY-MM
+    // Label each band with YYYY_MM
     var label = date.format('YYYY_MM');
-    var renamedBands = indexNames.map(function(idx) {
+    var renamedBands = ee.List(indexNames.map(function(idx) {
       return ee.String(idx).cat('_').cat(label);
-    });
+    }));
     return composite.rename(renamedBands).set('system:time_start', date.millis());
   }));
 
@@ -361,20 +361,21 @@ var getTerrainFeatures = function(roi) {
 // Compute phenology-relevant temporal statistics from monthly composites
 var computeTemporalStats = function(s2Monthly, year, roi) {
 
-  // Helper: filter months within a range for the target year
+  // Helper: extract a single index for months in [startMonth, endMonth] of the target year.
+  // Each monthly composite image has bands like "NDVI_2024_05", "BSI_2024_03", etc.
+  // We filter the collection to the desired months, then select & rename the band.
   var filterMonths = function(collection, indexName, startMonth, endMonth) {
-    return collection.map(function(img) {
-      var date = ee.Date(img.get('system:time_start'));
-      var month = date.get('month');
-      var yr = date.get('year');
-      // Select the band matching this index for this month
-      var bandName = ee.String(indexName).cat('_').cat(date.format('YYYY_MM'));
-      return ee.Algorithms.If(
-        yr.eq(year).and(month.gte(startMonth)).and(month.lte(endMonth)),
-        img.select([bandName]).rename(indexName),
-        null
-      );
-    }, true);  // dropNulls = true
+    // Filter the collection to images whose month falls in range and year matches
+    var filtered = collection.filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+                             .filter(ee.Filter.calendarRange(year, year, 'year'));
+    // For each image, select the band matching this index and rename it
+    return filtered.map(function(img) {
+      // The image has bands like "NDVI_2024_05", "SAVI_2024_05", etc.
+      // Select all bands whose name starts with the index prefix
+      var matching = img.bandNames().filter(ee.Filter.stringStartsWith('item', indexName + '_'));
+      // Select the first matching band and rename to the plain index name
+      return img.select(matching).rename(indexName);
+    });
   };
 
   // ── Growing season NDVI stats (May–October) ───────────────────────────
@@ -555,14 +556,14 @@ var smartClustering = function(combinedBands, roi, nClusters, scoreImage, scoreT
     .filter(ee.Filter.gte('mean_score', scoreThreshold));
 
   // Build a mask of auto-selected clusters
-  var autoSelectedMask = selectedClusters.aggregate_array('cluster_id').map(function(cid) {
-    return clusterImage.eq(ee.Number(cid));
-  });
+  var selectedIds = selectedClusters.aggregate_array('cluster_id');
 
-  // Combine all selected cluster masks with OR
-  var finalMask = ee.ImageCollection(autoSelectedMask.map(function(m) {
-    return ee.Image(m);
-  })).max();  // max of binary masks = OR
+  // Create a combined mask: for each selected cluster ID, create a binary mask,
+  // then OR them together. Guard against empty selection with a fallback.
+  var finalMask = selectedIds.iterate(function(cid, acc) {
+    return ee.Image(acc).or(clusterImage.eq(ee.Number(cid)));
+  }, ee.Image.constant(0).rename('cluster'));
+  finalMask = ee.Image(finalMask);
 
   // The detected upland rice image preserves cluster IDs
   var detectedUplandRice = clusterImage.updateMask(finalMask);
@@ -1196,7 +1197,7 @@ var makeRow = function(color, label) {
   });
   var description = ui.Label({value: label, style: {fontSize: '11px', margin: '0 0 4px 0'}});
   return ui.Panel({widgets: [colorBox, description],
-    layout: ui.Panel.Layout.Flow('horizontal')});
+    layout: ui.Panel.Layout.flow('horizontal')});
 };
 
 legendPanel.add(makeRow(UPLAND_RICE_COLOR, 'Detected Upland Rice'));
